@@ -58,7 +58,14 @@ class ANMATScraperV2:
     def _load_laboratorios(self):
         """Carga la lista de laboratorios desde el archivo CSV"""
         laboratorios = []
-        with open(self.laboratorios_file, 'r', encoding='utf-8') as f:
+        import os
+        # Si el archivo no existe en la ruta actual, buscar en el mismo directorio del script
+        file_path = self.laboratorios_file
+        if not os.path.exists(file_path):
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            file_path = os.path.join(script_dir, self.laboratorios_file)
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
             reader = csv.reader(f)
             next(reader)  # Saltar encabezado
             for row in reader:
@@ -82,6 +89,24 @@ class ANMATScraperV2:
                 'Disponibilidad',
                 'Timestamp_Extraccion'
             ])
+
+    def _reiniciar_driver(self):
+        """Reinicia el navegador Chrome"""
+        try:
+            if self.driver:
+                self.driver.quit()
+        except:
+            pass
+        
+        chrome_options = Options()
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--window-size=1920,1080")
+        
+        self.driver = webdriver.Chrome(options=chrome_options)
+        self.wait = WebDriverWait(self.driver, 20)
+        print("    [INFO] Driver reiniciado")
 
     def search_by_laboratorio(self, laboratorio_nombre):
         """
@@ -278,10 +303,14 @@ class ANMATScraperV2:
                 # Verificar si hay más páginas
                 try:
                     # Buscar el botón "Siguiente" en el paginador
-                    next_button = self.driver.find_element(
-                        By.XPATH,
-                        "//div[@id='zk_comp_98']//a[@name='zk_comp_98-next']"
-                    )
+                    try:
+                        next_button = self.driver.find_element(
+                            By.XPATH,
+                            "//div[@id='zk_comp_98']//a[@name='zk_comp_98-next']"
+                        )
+                    except NoSuchElementException:
+                        print(f"      Boton siguiente no encontrado - fin de paginacion")
+                        break
 
                     # Verificar si está deshabilitado
                     disabled_attr = next_button.get_attribute('disabled')
@@ -299,17 +328,23 @@ class ANMATScraperV2:
                     time.sleep(self.delay)
                     page_num += 1
 
-                except NoSuchElementException:
-                    print(f"      Boton siguiente no encontrado - fin de paginacion")
-                    break
                 except Exception as e:
-                    print(f"        Error navegando a siguiente pagina: {str(e)}")
+                    error_str = str(e).lower()
+                    if 'no such element' in error_str or 'not found' in error_str:
+                        print(f"      Fin de paginacion")
+                    else:
+                        print(f"        Error en paginacion: {str(e)}")
                     break
 
             return results
 
         except Exception as e:
-            print(f"      Error extrayendo resultados: {str(e)}")
+            error_str = str(e).lower()
+            if 'invalid session id' in error_str or 'disconnected' in error_str:
+                print(f"      Error de sesión: reintentar la búsqueda")
+                raise  # Re-lanzar para que sea manejado en el nivel superior
+            else:
+                print(f"      Error extrayendo resultados: {str(e)}")
             return results
 
     def save_results(self, results):
@@ -372,13 +407,33 @@ class ANMATScraperV2:
 
                 print(f"\n[{idx}/{len(self.laboratorios)}] Laboratorio: {laboratorio[:60]}")
 
-                results = self.search_by_laboratorio(laboratorio)
+                # Reintentar hasta 3 veces si hay error de sesión
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        results = self.search_by_laboratorio(laboratorio)
 
-                if results:
-                    print(f"    [OK] Encontrados {len(results)} medicamentos")
-                    self.save_results(results)
-                    self.laboratorios_con_resultados += 1
-                    print(f"    Total acumulado: {self.results_count} medicamentos")
+                        if results:
+                            print(f"    [OK] Encontrados {len(results)} medicamentos")
+                            self.save_results(results)
+                            self.laboratorios_con_resultados += 1
+                            print(f"    Total acumulado: {self.results_count} medicamentos")
+                        
+                        break  # Salir del loop de reintentos si fue exitoso
+                        
+                    except Exception as e:
+                        error_str = str(e).lower()
+                        if 'invalid session id' in error_str or 'disconnected' in error_str:
+                            print(f"    [REINTENTAR] Error de sesión (intento {attempt + 1}/{max_retries})")
+                            if attempt < max_retries - 1:
+                                self._reiniciar_driver()
+                                time.sleep(2)
+                            else:
+                                print(f"    [ERROR] No se pudo procesar después de {max_retries} intentos")
+                                break
+                        else:
+                            print(f"    Error: {str(e)}")
+                            break
 
                 # Verificar límite de laboratorios
                 if max_labs and labs_procesados >= max_labs:
@@ -414,8 +469,8 @@ if __name__ == "__main__":
     scraper = ANMATScraperV2(
         laboratorios_file='LaboratoriosANMAT.txt',
         output_file='medicamentos_anmat_completo.csv',
-        headless=False,  # Cambiar a True para ejecutar sin ventana visible
-        delay=2  # Segundos de espera entre solicitudes
+        headless=True,  # Cambiar a True para ejecutar sin ventana visible
+        delay=0.5  # Segundos de espera entre solicitudes
     )
 
     # Para hacer una prueba con los primeros 5 laboratorios:
@@ -425,4 +480,4 @@ if __name__ == "__main__":
     scraper.run()
 
     # Para reanudar desde un laboratorio específico:
-    # scraper.run(start_from='BAYER SOCIEDAD ANONIMA')
+    # scraper.run(start_from='INMUNOLAB SA')
